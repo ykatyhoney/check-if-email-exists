@@ -49,6 +49,8 @@ pub struct SmtpConnection {
 	pub host: String,
 	/// The port we connected to via SMTP.
 	pub port: u16,
+	/// Whether we used a proxy for the SMTP connection.
+	pub used_proxy: bool,
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -112,35 +114,37 @@ pub async fn check_smtp(
 	let webdriver_addr = env::var("RCH_WEBDRIVER_ADDR");
 
 	if is_hotmail(&host) {
-		match (&input.hotmail_verif_method, webdriver_addr) {
-			(HotmailVerifMethod::OneDriveApi, _) => {
-				if is_microsoft365(&host) {
-					match outlook::microsoft365::check_microsoft365_api(to_email, input).await {
-						Ok(Some(smtp_details)) => {
-							return {
-								(
-									Ok(smtp_details),
-									SmtpDebug {
-										verif_method: VerifMethod::Api,
-									},
-								)
-							}
-						}
-						// Continue in the event of an error/ambiguous result.
-						Err(err) => {
-							return (
-								Err(err.into()),
+		match (
+			&input.hotmail_verif_method,
+			webdriver_addr,
+			is_microsoft365(&host),
+		) {
+			(HotmailVerifMethod::OneDriveApi, _, true) => {
+				match outlook::microsoft365::check_microsoft365_api(to_email, input).await {
+					Ok(Some(smtp_details)) => {
+						return {
+							(
+								Ok(smtp_details),
 								SmtpDebug {
 									verif_method: VerifMethod::Api,
 								},
-							);
+							)
 						}
-						_ => {}
 					}
+					// Continue in the event of an error/ambiguous result.
+					Err(err) => {
+						return (
+							Err(err.into()),
+							SmtpDebug {
+								verif_method: VerifMethod::Api,
+							},
+						);
+					}
+					_ => {}
 				}
 			}
 			#[cfg(feature = "headless")]
-			(HotmailVerifMethod::Headless, Ok(a)) => {
+			(HotmailVerifMethod::Headless, Ok(a), false) => {
 				return (
 					outlook::headless::check_password_recovery(to_email.to_string().as_str(), &a)
 						.await
@@ -193,7 +197,11 @@ pub async fn check_smtp(
 	(
 		check_smtp_with_retry(to_email, &host, port, domain, input, input.retries).await,
 		SmtpDebug {
-			verif_method: VerifMethod::Smtp(SmtpConnection { host, port }),
+			verif_method: VerifMethod::Smtp(SmtpConnection {
+				host,
+				port,
+				used_proxy: input.proxy.is_some(),
+			}),
 		},
 	)
 }
@@ -222,7 +230,8 @@ mod tests {
 			smtp_debug.verif_method,
 			super::VerifMethod::Smtp(SmtpConnection {
 				host: host.to_string(),
-				port: 25
+				port: 25,
+				used_proxy: input.proxy.is_some(),
 			})
 		);
 		match res {
